@@ -1,0 +1,28 @@
+# Cross-compile to Windows x86_64.
+#
+# Two targets are supported:
+#
+#   x86_64-pc-windows-gnu      -- links against MSVCRT via Arch's mingw-w64.
+#                                 Used for the "no deps" lean build, but NOT
+#                                 compatible with static-linking MSYS2 ucrt64
+#                                 libraries because of CRT mismatch.
+#
+#   x86_64-pc-windows-gnullvm  -- links against UCRT via llvm-mingw (clang).
+#                                 Matches MSYS2 ucrt64 static libraries, and
+#                                 matches UCRT-based libsigrok.dll. Use this
+#                                 target when we need to statically link glib2.
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar     = "x86_64-w64-mingw32-ar"
+
+[target.x86_64-pc-windows-gnullvm]
+linker = "/opt/llvm-mingw/llvm-mingw-ucrt/bin/x86_64-w64-mingw32-clang"
+ar     = "/opt/llvm-mingw/llvm-mingw-ucrt/bin/llvm-ar"
+# Force static libunwind. llvm-mingw ships BOTH libunwind.dll.a and
+# libunwind.a in the same directory, and the linker prefers the import
+# library (.dll.a) when both are present. We prepend a shim directory that
+# contains only libunwind.a as a symlink, so ld resolves -lunwind to it
+# first and the final exe has no libunwind.dll dependency.
+rustflags = [
+    "-C", "link-arg=-L/home/taorye/workspace/ngscope-ws-ng/winbuild/static-shim",
+]

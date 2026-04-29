@@ -1,0 +1,15 @@
+[package]
+name = "sigrok-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "sigrok-bridge"
+path = "src/main.rs"
+
+[dependencies]
+sigrok-bridge-common = { path = "../sigrok-bridge-common" }
+libsigrok-sys = { path = "../libsigrok-sys" }
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"

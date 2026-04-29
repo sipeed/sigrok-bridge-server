@@ -1,0 +1,10 @@
+[workspace]
+members = ["sigrok-bridge-common", "fake", "sigrok-bridge", "libsigrok-sys"]
+resolver = "2"
+
+# Release build: abort on panic. This avoids pulling in the LLVM libunwind
+# shared library on the gnullvm Windows target and shrinks the binary. A
+# panic in a server daemon means unrecoverable state anyway, so we don't
+# lose anything practical by abort-on-panic.
+[profile.release]
+panic = "abort"

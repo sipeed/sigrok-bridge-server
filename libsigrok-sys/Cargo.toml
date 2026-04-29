@@ -1,0 +1,11 @@
+[package]
+name = "libsigrok-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Raw FFI bindings for libsigrok. Bootstraps libsigrok + glib2 from source and links statically — `cargo build` produces a self-contained binary with no libsigrok.so / libglib2.so runtime dependency."
+links = "sigrok"
+
+# Cargo's `links = "sigrok"` makes this crate the single source of truth for
+# libsigrok linkage in the workspace. Downstream crates that want to call
+# libsigrok symbols must depend on this one — they cannot emit their own
+# `cargo:rustc-link-lib=sigrok`.
