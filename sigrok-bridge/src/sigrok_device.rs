@@ -568,6 +568,18 @@ impl BridgeDevice for SigrokDevice {
     }
 
     fn set_rate(&self, rate: u64) -> Result<(), String> {
+        if !self.sample_rates.contains(&rate) {
+            return Err(format!(
+                "Unsupported sample rate {} Hz (advertised rates: {})",
+                rate,
+                self.sample_rates
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+
         unsafe {
             let variant = ffi::g_variant_new_uint64(rate);
             let ret = ffi::sr_config_set(
@@ -579,8 +591,25 @@ impl BridgeDevice for SigrokDevice {
             if ret != SR_OK {
                 return Err(format!("Failed to set sample rate: {}", ret));
             }
-            self.sample_rate.store(rate, Ordering::SeqCst);
-            log::info!("Sample rate set to {} Hz", rate);
+
+            // Read back the value selected by the driver. Some drivers clamp
+            // unsupported values while still returning SR_OK; never report the
+            // requested value as active unless it actually took effect.
+            let mut actual_variant: *mut GVariant = ptr::null_mut();
+            let ret = ffi::sr_config_get(
+                self.driver,
+                self.sdi,
+                ptr::null(),
+                SR_CONF_SAMPLERATE,
+                &mut actual_variant,
+            );
+            if ret != SR_OK || actual_variant.is_null() {
+                return Err(format!("Failed to read back sample rate: {}", ret));
+            }
+            let actual = ffi::g_variant_get_uint64(actual_variant);
+            ffi::g_variant_unref(actual_variant);
+            self.sample_rate.store(actual, Ordering::SeqCst);
+            log::info!("Sample rate set to {} Hz", actual);
             Ok(())
         }
     }

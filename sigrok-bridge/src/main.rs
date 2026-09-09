@@ -66,22 +66,12 @@ fn main() {
     }
 
     // Query and cache available rates and depths
-    device.sample_rates = device.get_available_rates().unwrap_or_else(|e| {
-        log::warn!("Could not query sample rates: {}. Using defaults.", e);
-        vec![1_000_000, 10_000_000, 100_000_000]
-    });
-    device.sample_depths = device.get_available_depths().unwrap_or_else(|e| {
-        log::warn!("Could not query sample depths: {}. Using defaults.", e);
-        let mut depths = Vec::new();
-        let mut val = 1000u64;
-        while val <= 1_000_000_000_000 {
-            for &mult in &[1, 2, 5] {
-                depths.push(val * mult);
-            }
-            val *= 10;
-        }
-        depths
-    });
+    device.sample_rates = device
+        .get_available_rates()
+        .expect("Device driver did not report sample rates");
+    device.sample_depths = device
+        .get_available_depths()
+        .expect("Device driver did not report sample depths");
 
     // Set initial rate and depth
     if let Some(&rate) = device.sample_rates.first() {

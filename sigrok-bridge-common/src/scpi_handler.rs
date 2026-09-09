@@ -68,7 +68,11 @@ pub fn handle_scpi_commands<D: BridgeDevice>(
         }
         ScpiCommand::Rate(r) => {
             if let Err(e) = device.set_rate(r) {
-                log::error!("Failed to set rate: {}", e);
+                log::error!(
+                    "Failed to set rate: {}. Active rate remains {} Hz",
+                    e,
+                    device.get_rate()
+                );
             }
         }
 
