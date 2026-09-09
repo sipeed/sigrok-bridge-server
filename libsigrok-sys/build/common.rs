@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 /// Default libsigrok commit (sipeed/libsigrok @ slogic-dev, snapshot).
 /// Override at build time with `LIBSIGROK_COMMIT=<sha>` to track a newer
 /// upstream; the bootstrap fetches the matching GitHub archive tarball.
-pub const LIBSIGROK_COMMIT_DEFAULT: &str = "4e358ae9fdbbb1a30e90798d03bf0412afe31a4d";
+pub const LIBSIGROK_COMMIT_DEFAULT: &str = "6027cbfffba619a0e681928466c907f3e356ea20";
 pub const LIBSIGROK_TARBALL_URL_TPL: &str =
     "https://github.com/sipeed/libsigrok/archive/{COMMIT}.tar.gz";
 
@@ -178,6 +178,7 @@ pub fn log(msg: &str) {
 }
 
 pub fn emit_rerun() {
+    println!("cargo:rerun-if-changed=patches/libsigrok-bridge-fixes.patch");
     for k in [
         "LIBSIGROK_SYS_CACHE_DIR",
         "LIBSIGROK_SYS_TARBALL_DIR",

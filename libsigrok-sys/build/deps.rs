@@ -18,7 +18,8 @@
 //!                   │
 //!              libsigrok
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::common;
@@ -362,16 +363,34 @@ pub fn build_glib(ctx: &Ctx) {
 }
 
 pub fn build_libsigrok(ctx: &Ctx) {
-    if ctx.prefix.join("lib/libsigrok.a").exists() { return; }
-    common::log(">>> [8/8] libsigrok");
-
     let commit = common::libsigrok_commit();
+    let bridge_patch = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("patches/libsigrok-bridge-fixes.patch");
+    let patch_contents = fs::read(&bridge_patch).expect("read libsigrok bridge patch");
+    let patch_stamp = ctx.prefix.join(".libsigrok-bridge-fixes.patch");
+    let mut stamp_contents = commit.as_bytes().to_vec();
+    stamp_contents.push(b'\n');
+    stamp_contents.extend_from_slice(&patch_contents);
+    let library = ctx.prefix.join("lib/libsigrok.a");
+    if library.exists()
+        && fs::read(&patch_stamp).ok().as_deref() == Some(stamp_contents.as_slice())
+    {
+        return;
+    }
+
+    common::log(">>> [8/8] libsigrok");
     common::log(&format!("    commit: {commit}"));
 
     let tarball  = ctx.tarballs.join(format!("libsigrok-{commit}.tar.gz"));
     let builddir = ctx.src.join(format!("libsigrok-{commit}"));
+    if library.exists() {
+        fs::remove_file(&library).expect("remove stale libsigrok.a");
+    }
+    if builddir.exists() {
+        fs::remove_dir_all(&builddir).expect("remove stale patched libsigrok source");
+    }
     common::fetch(&common::libsigrok_tarball_url(&commit), &tarball);
-    if !builddir.exists() { common::extract(&tarball, &ctx.src); }
+    common::extract(&tarball, &ctx.src);
 
     // VXI-11 patch: drop the scpi_vxi_dev registration. scpi_vxi.o would
     // otherwise force libtirpc + the krb5 chain via xdr_*.
@@ -379,6 +398,21 @@ pub fn build_libsigrok(ctx: &Ctx) {
         Command::new("sed").current_dir(&builddir)
             .args(["-i", "/scpi_vxi_dev/d", "src/scpi/scpi.c"]),
         "libsigrok: patch out VXI-11");
+
+    // Add bridge-facing capability metadata and avoid treating a completed
+    // short capture as a throughput timeout.
+    let api_path = builddir.join("src/hardware/sipeed-slogic-analyzer/api.c");
+    let already_patched = fs::read_to_string(&api_path)
+        .map(|contents| contents.contains("sampledepths_slogic"))
+        .unwrap_or(false);
+    if !already_patched {
+        common::run(
+            Command::new("patch")
+                .current_dir(&builddir)
+                .args(["-p1", "--forward", "--batch", "--fuzz=0", "--input"])
+                .arg(&bridge_patch),
+            "libsigrok: apply bridge integration fixes");
+    }
 
     common::run(Command::new("./autogen.sh").current_dir(&builddir), "libsigrok: autogen");
 
@@ -438,4 +472,6 @@ pub fn build_libsigrok(ctx: &Ctx) {
             "libsigrok.pc",
         ])
         .status();
+
+    fs::write(patch_stamp, stamp_contents).expect("write libsigrok bridge patch stamp");
 }

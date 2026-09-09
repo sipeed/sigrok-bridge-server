@@ -1,0 +1,30 @@
+diff --git a/src/hardware/sipeed-slogic-analyzer/api.c b/src/hardware/sipeed-slogic-analyzer/api.c
+index c9f290f..e4f703c 100644
+--- a/src/hardware/sipeed-slogic-analyzer/api.c
++++ b/src/hardware/sipeed-slogic-analyzer/api.c
+@@ -37 +37 @@ static const uint32_t devopts[] = {
+-	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
++	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+@@ -146,0 +147,10 @@ static const uint64_t limit_samplerates_slogic32u3[] =
++static const uint64_t sampledepths_slogic[] = {
++	UINT64_C(1000), UINT64_C(2000), UINT64_C(5000),
++	UINT64_C(10000), UINT64_C(20000), UINT64_C(50000),
++	UINT64_C(100000), UINT64_C(200000), UINT64_C(500000),
++	UINT64_C(1000000), UINT64_C(2000000), UINT64_C(5000000),
++	UINT64_C(10000000), UINT64_C(20000000), UINT64_C(50000000),
++	UINT64_C(100000000), UINT64_C(200000000), UINT64_C(500000000),
++	UINT64_C(1000000000),
++};
++
+@@ -600,0 +611,3 @@ static int config_list(uint32_t key, GVariant **data,
++	case SR_CONF_LIMIT_SAMPLES:
++		*data = std_gvar_array_u64(ARRAY_AND_SIZE(sampledepths_slogic));
++		break;
+diff --git a/src/hardware/sipeed-slogic-analyzer/protocol.c b/src/hardware/sipeed-slogic-analyzer/protocol.c
+index ffe8818..0ca50f4 100644
+--- a/src/hardware/sipeed-slogic-analyzer/protocol.c
++++ b/src/hardware/sipeed-slogic-analyzer/protocol.c
+@@ -149 +149,2 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
+-	if (devc->num_transfers_completed > 1 &&
++	if (devc->samples_got_nbytes < devc->samples_need_nbytes &&
++	    devc->num_transfers_completed > 1 &&
