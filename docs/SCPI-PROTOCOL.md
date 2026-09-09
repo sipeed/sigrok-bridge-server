@@ -73,6 +73,12 @@ The client sends a single byte `'K'` (0x4B) to request the next waveform.
 | 22     | 8    | i64   | trigger_fs     | Trigger offset in femtoseconds       |
 | 30     | 8    | f64   | wfms_s         | Waveforms per second (performance)   |
 
+`fs_per_sample` is a period, not a frequency. For example,
+`fs_per_sample=200000000` means 200,000,000 femtoseconds per sample, which
+corresponds to a 5 MHz sample rate. Diagnostic readers that call the header
+members `field1` and `field2` are referring to `fs_per_sample` and
+`trigger_fs`, respectively.
+
 ### Response: Waveform Data
 
 Data follows the header immediately, sent in chunks of 256K samples.
@@ -83,7 +89,8 @@ Data follows the header immediately, sent in chunks of 256K samples.
 #### Digital Mode (ADC mode 0)
 
 Each sample is bit-packed: channel N corresponds to bit N of the sample word.
-For 16 channels, each sample is 2 bytes (little-endian).
+For 16 channels, each sample is 2 bytes (little-endian). For 32 channels,
+each sample is 4 bytes (little-endian), with D0 in bit 0 and D31 in bit 31.
 
 #### Analog Mode (ADC mode 1)
 
