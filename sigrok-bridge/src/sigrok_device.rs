@@ -699,10 +699,6 @@ impl BridgeDevice for SigrokDevice {
 
             let mut result = {
                 let acq = self.cb_state.acquisition.lock().unwrap();
-                log::info!(
-                    "acquire: done, {} bytes logic data, unitsize={}, triggered={}",
-                    acq.logic_data.len(), acq.unitsize, acq.triggered
-                );
                 AcquisitionData {
                     logic_data: acq.logic_data.clone(),
                     unitsize: acq.unitsize,
@@ -710,6 +706,14 @@ impl BridgeDevice for SigrokDevice {
                     trigger_sample: acq.trigger_sample,
                 }
             };
+
+            // FORCE is a bridge-side trigger operation, so libsigrok does not
+            // emit SR_DF_TRIGGER for it. Mark the acquisition here so every
+            // layer observes the same effective trigger state.
+            if self.force_trigger.load(Ordering::SeqCst) && !result.logic_data.is_empty() {
+                result.triggered = true;
+                result.trigger_sample = 0;
+            }
 
             // Software trigger fallback: if the hardware didn't report a
             // trigger point, scan the data for the first matching edge. Uses
@@ -783,6 +787,11 @@ impl BridgeDevice for SigrokDevice {
                     }
                 }
             }
+
+            log::info!(
+                "acquire: done, {} bytes logic data, unitsize={}, triggered={}",
+                result.logic_data.len(), result.unitsize, result.triggered
+            );
 
             Ok(result)
         }
