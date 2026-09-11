@@ -671,11 +671,18 @@ impl BridgeDevice for SigrokDevice {
     /// Run a single acquisition: apply trigger, start session, collect data,
     /// and run software trigger fallback if hardware didn't fire.
     fn acquire(&self) -> Result<AcquisitionData, String> {
-        // Apply hardware trigger (best-effort: log warning on error, continue)
-        match self.apply_hardware_trigger() {
-            Ok(true) => log::debug!("Hardware trigger applied"),
-            Ok(false) => log::debug!("No trigger source configured, skipping hardware trigger"),
-            Err(e) => log::warn!("Failed to apply hardware trigger: {}", e),
+        // FORCE explicitly bypasses trigger waiting. Do not install a hardware
+        // trigger in this path, otherwise sr_session_run() can block forever
+        // waiting for an edge that FORCE was meant to bypass.
+        if self.force_trigger.load(Ordering::SeqCst) {
+            log::debug!("Force trigger active, skipping hardware trigger");
+        } else {
+            // Apply hardware trigger (best-effort: log warning on error, continue)
+            match self.apply_hardware_trigger() {
+                Ok(true) => log::debug!("Hardware trigger applied"),
+                Ok(false) => log::debug!("No trigger source configured, skipping hardware trigger"),
+                Err(e) => log::warn!("Failed to apply hardware trigger: {}", e),
+            }
         }
 
         unsafe {
