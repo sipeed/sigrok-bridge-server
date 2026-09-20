@@ -26,8 +26,8 @@ use crate::common;
 
 // ─── Pinned upstream versions ────────────────────────────────────────────────
 
-const LIBFFI_URL:   &str = "https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz";
-const LIBFFI_VER:   &str = "3.4.6";
+const LIBFFI_URL:   &str = "https://github.com/libffi/libffi/releases/download/v3.5.2/libffi-3.5.2.tar.gz";
+const LIBFFI_VER:   &str = "3.5.2";
 const ZLIB_URL:     &str = "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz";
 const ZLIB_VER:     &str = "1.3.1";
 const LIBUSB_URL:   &str = "https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.tar.bz2";
