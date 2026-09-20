@@ -393,11 +393,16 @@ pub fn build_libsigrok(ctx: &Ctx) {
     common::extract(&tarball, &ctx.src);
 
     // VXI-11 patch: drop the scpi_vxi_dev registration. scpi_vxi.o would
-    // otherwise force libtirpc + the krb5 chain via xdr_*.
-    common::run(
-        Command::new("sed").current_dir(&builddir)
-            .args(["-i", "/scpi_vxi_dev/d", "src/scpi/scpi.c"]),
-        "libsigrok: patch out VXI-11");
+    // otherwise force libtirpc + the krb5 chain via xdr_*. Edited in-process:
+    // `sed -i` is not portable between GNU and BSD sed.
+    let scpi_path = builddir.join("src/scpi/scpi.c");
+    let scpi_src = fs::read_to_string(&scpi_path).expect("read scpi.c");
+    let scpi_src: String = scpi_src
+        .lines()
+        .filter(|l| !l.contains("scpi_vxi_dev"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    fs::write(&scpi_path, scpi_src).expect("libsigrok: patch out VXI-11");
 
     // Add bridge-facing capability metadata and avoid treating a completed
     // short capture as a throughput timeout.
@@ -462,16 +467,21 @@ pub fn build_libsigrok(ctx: &Ctx) {
     // libsigrok.pc still lists stale transport deps in Requires.private and
     // -ltirpc in Libs.private. Strip so `pkg-config --static --libs libsigrok`
     // emits a clean link line.
-    let _ = Command::new("sed")
-        .current_dir(ctx.prefix.join("lib/pkgconfig"))
-        .args([
-            "-i",
-            "-e", "s/^Requires.private:.*/Requires.private: zlib libusb-1.0 gio-2.0 libzip/",
-            "-e", "s/-ltirpc //g",
-            "-e", "s/ -ltirpc//g",
-            "libsigrok.pc",
-        ])
-        .status();
+    let pc_path = ctx.prefix.join("lib/pkgconfig/libsigrok.pc");
+    if let Ok(pc) = fs::read_to_string(&pc_path) {
+        let pc: String = pc
+            .lines()
+            .map(|l| {
+                if l.starts_with("Requires.private:") {
+                    "Requires.private: zlib libusb-1.0 gio-2.0 libzip".to_string()
+                } else {
+                    l.replace("-ltirpc ", "").replace(" -ltirpc", "")
+                }
+            })
+            .map(|l| format!("{l}\n"))
+            .collect();
+        fs::write(&pc_path, pc).expect("rewrite libsigrok.pc");
+    }
 
     fs::write(patch_stamp, stamp_contents).expect("write libsigrok bridge patch stamp");
 }
