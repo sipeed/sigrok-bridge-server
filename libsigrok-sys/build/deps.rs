@@ -336,6 +336,9 @@ pub fn build_glib(ctx: &Ctx) {
         .arg(format!("--prefix={}", ctx.prefix.display()))
         .args([
             "--buildtype=release",
+            // Force a non-multiarch libdir: on Debian/Ubuntu meson defaults to
+            // lib/<triplet>, but the caller probes $prefix/lib for libglib-2.0.a.
+            "--libdir=lib",
             "--default-library=static",
             "-Dtests=false",
             "-Dinstalled_tests=false",
