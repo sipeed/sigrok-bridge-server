@@ -1,3 +1,14 @@
+/// One 8-bit byte-group of the physical capture width, tagged as either analog
+/// (the whole byte is one ADC channel) or digital (the byte's 8 bits are 8
+/// logic lines). The ordered set of these — one per byte, ascending
+/// `byte_offset` — is the channel layout advertised to the client via LAYOUT?.
+#[derive(Clone, Debug)]
+pub struct ChannelGroup {
+    pub analog: bool,
+    pub byte_offset: usize,
+    pub name: String,
+}
+
 /// Device information returned by *IDN? query
 pub struct DeviceInfo {
     pub vendor: String,

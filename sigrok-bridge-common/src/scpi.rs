@@ -6,6 +6,7 @@ pub enum ScpiCommand {
 
     // Channel queries
     Chans,
+    Layout,
     Rates,
     Depths,
 
@@ -33,9 +34,6 @@ pub enum ScpiCommand {
     TrigSource(String),
     TrigLevel(f32),
     TrigEdgeDir(String),
-
-    // ADC mode (0=digital, 1=8-bit analog)
-    AdcMode(u8),
 }
 
 /// Parse a single SCPI command line into a ScpiCommand.
@@ -51,6 +49,7 @@ pub fn parse_scpi_line(line: &str) -> Option<ScpiCommand> {
     match line {
         "*IDN?" => return Some(ScpiCommand::Idn),
         "CHANS?" => return Some(ScpiCommand::Chans),
+        "LAYOUT?" => return Some(ScpiCommand::Layout),
         "RATES?" => return Some(ScpiCommand::Rates),
         "DEPTHS?" => return Some(ScpiCommand::Depths),
         "START" => return Some(ScpiCommand::Start),
@@ -67,9 +66,6 @@ pub fn parse_scpi_line(line: &str) -> Option<ScpiCommand> {
     }
     if let Some(val) = line.strip_prefix("RATE ") {
         return val.trim().parse::<u64>().ok().map(ScpiCommand::Rate);
-    }
-    if let Some(val) = line.strip_prefix("ADC:MODE ") {
-        return val.trim().parse::<u8>().ok().map(ScpiCommand::AdcMode);
     }
 
     // Trigger commands
@@ -159,9 +155,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_adc_mode() {
-        assert!(matches!(parse_scpi_line("ADC:MODE 0"), Some(ScpiCommand::AdcMode(0))));
-        assert!(matches!(parse_scpi_line("ADC:MODE 1"), Some(ScpiCommand::AdcMode(1))));
+    fn test_parse_layout_query() {
+        assert!(matches!(parse_scpi_line("LAYOUT?"), Some(ScpiCommand::Layout)));
     }
 
     #[test]

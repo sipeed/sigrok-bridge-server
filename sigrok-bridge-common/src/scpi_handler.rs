@@ -41,6 +41,23 @@ pub fn handle_scpi_commands<D: BridgeDevice>(
                 device.digital_channel_count()
             ))?;
         }
+        ScpiCommand::Layout => {
+            // One comma-separated descriptor per byte-group, ascending offset:
+            //   <byteOffset>:<A|D>:<name>
+            let descriptors: Vec<String> = device
+                .channel_layout()
+                .iter()
+                .map(|g| {
+                    format!(
+                        "{}:{}:{}",
+                        g.byte_offset,
+                        if g.analog { "A" } else { "D" },
+                        g.name
+                    )
+                })
+                .collect();
+            conn.send_reply(&descriptors.join(","))?;
+        }
         ScpiCommand::Rates => {
             let rates: Vec<String> = device.sample_rates().iter().map(|r| r.to_string()).collect();
             conn.send_reply(&rates.join(","))?;
@@ -92,9 +109,6 @@ pub fn handle_scpi_commands<D: BridgeDevice>(
             Some(dir) => device.set_trigger_edge_dir(dir),
             None => log::warn!("Unknown trigger edge direction: {}", d),
         },
-
-        // ADC mode (fixed at bridge startup)
-        ScpiCommand::AdcMode(m) => log::debug!("ADC mode set to {}", m),
     }
 
     Ok(true)

@@ -25,11 +25,47 @@ struct Args {
     #[arg(long)]
     pattern_mode: Option<String>,
 
-    /// ADC mode: "digital" (default) treats each channel as a digital line;
-    /// "analog" groups every 8 digital lines into one 8-bit ADC channel.
-    /// Fixed at startup — client adapts on connect via CHANS? response.
-    #[arg(long, default_value = "digital")]
-    adc_mode: String,
+    /// Physical capture width in channels (8, 16, or 32). Sets
+    /// SR_CONF_NUM_LOGIC_CHANNELS on the device so the driver's rate ceiling
+    /// follows. Default: the device's hardware maximum.
+    #[arg(long)]
+    max_channels: Option<u32>,
+
+    /// Comma-separated byte-groups to expose as 8-bit analog channels, named
+    /// `A<idx>` (e.g. "A0,A2,A3"). Each `idx` is a byte-group index into the
+    /// capture width; all other groups in 0..max_channels/8 are digital.
+    /// Default: none (every group digital).
+    #[arg(long)]
+    analog_groups: Option<String>,
+
+    /// Pre-trigger samples to keep before the trigger point. Default 0: the
+    /// trigger edge is the left edge of the capture (post-trigger only, so a
+    /// zoomed view naturally keeps t=0 at the left and pre-trigger is never
+    /// shown). Set >0 to retain that many samples before the trigger (they sit
+    /// at t<0, left of the trigger; pan left to see them).
+    #[arg(long, default_value_t = 0)]
+    pretrigger: u64,
+}
+
+/// Parse an `--analog-groups` spec like "A0,A2,A3" into byte-group indices.
+/// Tokens are trimmed; the leading `A`/`a` prefix is optional. Invalid tokens
+/// are logged and skipped. Group indices out of range for the chosen
+/// max_channels are filtered later (in `SigrokDevice::open`) with a warning.
+fn parse_analog_groups(spec: &str) -> Vec<usize> {
+    spec.split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .filter_map(|tok| {
+            let digits = tok.strip_prefix(['A', 'a']).unwrap_or(tok);
+            match digits.parse::<usize>() {
+                Ok(idx) => Some(idx),
+                Err(_) => {
+                    log::warn!("Ignoring invalid analog group '{}'", tok);
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 fn main() {
@@ -37,26 +73,33 @@ fn main() {
 
     let args = Args::parse();
 
-    let analog_mode = match args.adc_mode.as_str() {
-        "analog" | "8bit" => true,
-        "digital" | "la" => false,
-        other => {
-            log::error!("Unknown --adc-mode '{}'. Use 'digital' or 'analog'.", other);
+    if let Some(mc) = args.max_channels {
+        if !matches!(mc, 8 | 16 | 32) {
+            log::error!("Invalid --max-channels '{}'. Use 8, 16, or 32.", mc);
             std::process::exit(1);
         }
-    };
+    }
+
+    let analog_groups = args
+        .analog_groups
+        .as_deref()
+        .map(parse_analog_groups)
+        .unwrap_or_default();
 
     log::info!(
-        "Sigrok bridge server starting: driver={}, port={}, adc_mode={}{}",
+        "Sigrok bridge server starting: driver={}, port={}, max_channels={}, analog_groups={:?}, pretrigger={}{}",
         args.driver,
         args.port,
-        if analog_mode { "analog" } else { "digital" },
+        args.max_channels.map(|m| m.to_string()).unwrap_or_else(|| "device-max".into()),
+        analog_groups,
+        args.pretrigger,
         args.pattern_mode.as_ref().map(|m| format!(", pattern_mode={}", m)).unwrap_or_default()
     );
 
     // Open device (libsigrok + glib are statically linked)
-    let mut device = SigrokDevice::open(&args.driver, 0, analog_mode)
-        .expect("Failed to open sigrok device");
+    let mut device =
+        SigrokDevice::open(&args.driver, 0, args.max_channels, &analog_groups, args.pretrigger)
+            .expect("Failed to open sigrok device");
 
     // Set pattern mode if specified
     if let Some(ref mode) = args.pattern_mode {

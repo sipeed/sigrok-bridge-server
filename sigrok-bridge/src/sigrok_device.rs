@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use sigrok_bridge_common::device::{AcquisitionData, BridgeDevice};
 use sigrok_bridge_common::trigger::{find_trigger_analog, find_trigger_digital};
-use sigrok_bridge_common::types::{parse_channel_hwname, DeviceInfo, TriggerConfig, TriggerEdgeDir};
+use sigrok_bridge_common::types::{
+    parse_channel_hwname, ChannelGroup, DeviceInfo, TriggerConfig, TriggerEdgeDir,
+};
 
 /// Snapshot of the trigger-config-dependent identity used to decide whether
 /// the persisted cross-buffer `last_trigger_state` is still valid. If any of
@@ -56,13 +58,17 @@ pub struct SigrokDevice {
     driver: *mut SrDevDriver,
 
     info: DeviceInfo,
-    /// Channel counts as reported to the client via CHANS? (mode-adjusted).
-    logic_channel_count: u16,
-    analog_channel_count: u16,
-    /// Physical digital lines from libsigrok (always the real hardware count,
-    /// regardless of ADC mode). Used for waveform header num_channels and
-    /// unitsize calculations since the raw data is always bit-packed digital.
+    /// Ordered per-byte channel layout (one entry per byte of the capture
+    /// width, ascending byte_offset). Source of truth for CHANS?/LAYOUT? and
+    /// the derived analog/digital channel counts.
+    channel_layout: Vec<ChannelGroup>,
+    /// Physical capture width in channels (= max_channels). Waveform header
+    /// num_channels and unitsize (= max_channels/8) derive from this; the raw
+    /// data is always bit-packed and routed to channels client-side.
     hw_digital_channel_count: u16,
+    /// Samples kept before the trigger point (0 = trigger at the left edge,
+    /// post-trigger only). Applied by cropping the buffer in acquire().
+    pretrigger: u64,
     pub sample_rates: Vec<u64>,
     pub sample_depths: Vec<u64>,
 
@@ -100,13 +106,18 @@ impl SigrokDevice {
     ///
     /// `driver_name` is e.g. "sipeed-slogic-analyzer" or "fx2lafw".
     /// `device_index` selects which device if multiple are found (0 = first).
-    /// `analog_mode`: when true, every 8 digital channels are grouped into one
-    /// 8-bit ADC channel. The reported channel counts (used by CHANS? reply)
-    /// are adjusted accordingly: analog = digital/8, digital = 0.
+    /// `max_channels`: physical capture width (8/16/32); `None` uses the
+    /// device's hardware logic count. Sets SR_CONF_NUM_LOGIC_CHANNELS so the
+    /// driver's rate ceiling follows.
+    /// `analog_groups`: byte-group indices to expose as 8-bit analog channels;
+    /// all other groups in 0..max_channels/8 are digital. Indices outside that
+    /// range are logged and ignored.
     pub fn open(
         driver_name: &str,
         device_index: usize,
-        analog_mode: bool,
+        max_channels: Option<u32>,
+        analog_groups: &[usize],
+        pretrigger: u64,
     ) -> Result<Self, String> {
         unsafe {
             // Initialize context
@@ -207,21 +218,65 @@ impl SigrokDevice {
                 }
             }
 
-            // Apply ADC mode: in analog mode, every 8 digital lines form one
-            // 8-bit ADC channel. The client sees only the virtual analog
-            // channels, not the underlying digital lines.
-            let (logic_count, analog_count) = if analog_mode {
-                let derived_analog = hw_logic_count / 8;
-                log::info!(
-                    "ADC mode: analog — {} HW digital lines → {} virtual 8-bit ADC channels",
-                    hw_logic_count, derived_analog
+            let _ = hw_analog_count;
+
+            // Resolve the physical capture width. Default to the hardware logic
+            // count; otherwise honor the caller's request.
+            let max_channels = max_channels.unwrap_or(hw_logic_count as u32);
+            if max_channels == 0 || max_channels % 8 != 0 {
+                return Err(format!(
+                    "Invalid max_channels {} (must be a positive multiple of 8)",
+                    max_channels
+                ));
+            }
+
+            // Tell the driver how many logic channels to capture BEFORE rates
+            // and depths are queried, so its rate ceiling follows the width.
+            let variant = ffi::g_variant_new_int32(max_channels as i32);
+            let ret = ffi::sr_config_set(
+                sdi,
+                ptr::null(),
+                SR_CONF_NUM_LOGIC_CHANNELS,
+                variant,
+            );
+            if ret != SR_OK {
+                log::warn!(
+                    "Failed to set NUM_LOGIC_CHANNELS={} (ret={}); driver may clamp",
+                    max_channels, ret
                 );
-                (0u16, derived_analog)
-            } else {
-                log::info!("ADC mode: digital — {} digital + {} analog channels",
-                    hw_logic_count, hw_analog_count);
-                (hw_logic_count, hw_analog_count)
-            };
+            }
+
+            // Build the ordered per-byte channel layout: one ChannelGroup per
+            // byte of the capture width, analog where requested, else digital.
+            let num_groups = (max_channels / 8) as usize;
+            let mut channel_layout: Vec<ChannelGroup> = Vec::with_capacity(num_groups);
+            for g in 0..num_groups {
+                let analog = analog_groups.contains(&g);
+                channel_layout.push(ChannelGroup {
+                    analog,
+                    byte_offset: g,
+                    name: if analog {
+                        format!("A{}", g)
+                    } else {
+                        format!("D{}", 8 * g)
+                    },
+                });
+            }
+            for &g in analog_groups {
+                if g >= num_groups {
+                    log::warn!(
+                        "Ignoring analog group A{} (out of range for {} byte-groups)",
+                        g, num_groups
+                    );
+                }
+            }
+
+            let analog_count = channel_layout.iter().filter(|g| g.analog).count();
+            let digital_group_count = num_groups - analog_count;
+            log::info!(
+                "Channel layout: {} bytes ({} analog groups, {} digital groups = {} logic lines)",
+                num_groups, analog_count, digital_group_count, 8 * digital_group_count
+            );
 
             // Create session
             let mut session: *mut SrSession = ptr::null_mut();
@@ -257,8 +312,8 @@ impl SigrokDevice {
             }
 
             log::info!(
-                "Opened device: {} {} (serial: {}, fw: {}), {} logic + {} analog channels",
-                vendor, model, serial, firmware, logic_count, analog_count
+                "Opened device: {} {} (serial: {}, fw: {}), capture width {} channels",
+                vendor, model, serial, firmware, max_channels
             );
 
             Ok(Self {
@@ -272,9 +327,9 @@ impl SigrokDevice {
                     serial,
                     firmware,
                 },
-                logic_channel_count: logic_count,
-                analog_channel_count: analog_count,
-                hw_digital_channel_count: hw_logic_count,
+                channel_layout,
+                hw_digital_channel_count: max_channels as u16,
+                pretrigger,
                 sample_rates: Vec::new(),
                 sample_depths: Vec::new(),
                 sample_rate: AtomicU64::new(0),
@@ -309,106 +364,6 @@ impl SigrokDevice {
             }
             log::info!("Pattern mode set to '{}'", mode);
             Ok(())
-        }
-    }
-
-    /// Build a libsigrok trigger from the current TriggerConfig and set it on
-    /// the session. Returns `Ok(true)` if a trigger was configured, `Ok(false)`
-    /// if no source channel is set or the channel type doesn't support hardware
-    /// triggers (analog channels are a client-side reinterpretation of digital
-    /// data, so libsigrok has no concept of them).
-    fn apply_hardware_trigger(&self) -> Result<bool, String> {
-        let config = self.trigger_config.lock().unwrap().clone();
-
-        let source_name = match &config.source_channel {
-            Some(name) => name.clone(),
-            None => return Ok(false),
-        };
-
-        // Analog channels (A0, A1, ...) are a client-side construct: the
-        // hardware captures digital data that the client reinterprets as
-        // 8-bit ADC values. libsigrok doesn't know about them, so hardware
-        // triggering is not possible. Software trigger fallback in acquire()
-        // handles this case.
-        if let Some((ch_type, _)) = parse_channel_hwname(&source_name) {
-            if ch_type == 'A' || ch_type == 'a' {
-                log::debug!("Trigger source '{}' is analog — skipping hardware trigger (software fallback will be used)", source_name);
-                return Ok(false);
-            }
-        }
-
-        let sr_channel = self.find_channel_by_hwname(&source_name)?;
-
-        let match_type = match config.edge_dir {
-            TriggerEdgeDir::Rising => ffi::SR_TRIGGER_RISING,
-            TriggerEdgeDir::Falling => ffi::SR_TRIGGER_FALLING,
-            TriggerEdgeDir::Any => ffi::SR_TRIGGER_EDGE,
-        };
-
-        unsafe {
-            let name = std::ffi::CString::new("edge_trigger").unwrap();
-            let trig = ffi::sr_trigger_new(name.as_ptr());
-            if trig.is_null() {
-                return Err("sr_trigger_new returned null".into());
-            }
-
-            let stage = ffi::sr_trigger_stage_add(trig);
-            if stage.is_null() {
-                ffi::sr_trigger_free(trig);
-                return Err("sr_trigger_stage_add returned null".into());
-            }
-
-            let ret = ffi::sr_trigger_match_add(stage, sr_channel, match_type, config.level);
-            if ret != SR_OK {
-                ffi::sr_trigger_free(trig);
-                return Err(format!("sr_trigger_match_add failed: {}", ret));
-            }
-
-            // sr_session_trigger_set takes ownership — do NOT free on success
-            let ret = ffi::sr_session_trigger_set(self.session, trig);
-            if ret != SR_OK {
-                ffi::sr_trigger_free(trig);
-                return Err(format!("sr_session_trigger_set failed: {}", ret));
-            }
-        }
-
-        log::info!(
-            "Hardware trigger configured: source={}, dir={:?}, level={}",
-            source_name, config.edge_dir, config.level
-        );
-        Ok(true)
-    }
-
-    /// Find a libsigrok channel by SCPI hardware name (e.g. "D0" -> 1st digital,
-    /// "A1" -> 2nd analog). Parses the type prefix and index, then walks the
-    /// libsigrok channel list to find the Nth channel of matching type.
-    fn find_channel_by_hwname(&self, hwname: &str) -> Result<*mut SrChannel, String> {
-        let (ch_type, ch_index) = parse_channel_hwname(hwname)
-            .ok_or_else(|| format!("Invalid channel name: {}", hwname))?;
-
-        let expected_sr_type = match ch_type {
-            'D' | 'd' => ffi::SR_CHANNEL_LOGIC,
-            'A' | 'a' => ffi::SR_CHANNEL_ANALOG,
-            _ => return Err(format!("Unknown channel type prefix: {}", ch_type)),
-        };
-
-        unsafe {
-            let ch_list = ffi::sr_dev_inst_channels_get(self.sdi);
-            let channels = ffi::gslist_iter(ch_list);
-            let mut type_count: usize = 0;
-            for ch_ptr in channels {
-                let ch = ch_ptr as *mut SrChannel;
-                if (*ch).type_ == expected_sr_type {
-                    if type_count == ch_index {
-                        return Ok(ch);
-                    }
-                    type_count += 1;
-                }
-            }
-            Err(format!(
-                "Channel '{}' not found (only {} channels of that type)",
-                hwname, type_count
-            ))
         }
     }
 
@@ -461,12 +416,17 @@ impl BridgeDevice for SigrokDevice {
         &self.info
     }
 
+    fn channel_layout(&self) -> &[ChannelGroup] {
+        &self.channel_layout
+    }
+
     fn analog_channel_count(&self) -> u16 {
-        self.analog_channel_count
+        self.channel_layout.iter().filter(|g| g.analog).count() as u16
     }
 
     fn digital_channel_count(&self) -> u16 {
-        self.logic_channel_count
+        // 8 logic lines per digital byte-group.
+        (self.channel_layout.iter().filter(|g| !g.analog).count() * 8) as u16
     }
 
     fn hw_digital_channel_count(&self) -> u16 {
@@ -671,19 +631,15 @@ impl BridgeDevice for SigrokDevice {
     /// Run a single acquisition: apply trigger, start session, collect data,
     /// and run software trigger fallback if hardware didn't fire.
     fn acquire(&self) -> Result<AcquisitionData, String> {
-        // FORCE explicitly bypasses trigger waiting. Do not install a hardware
-        // trigger in this path, otherwise sr_session_run() can block forever
-        // waiting for an edge that FORCE was meant to bypass.
-        if self.force_trigger.load(Ordering::SeqCst) {
-            log::debug!("Force trigger active, skipping hardware trigger");
-        } else {
-            // Apply hardware trigger (best-effort: log warning on error, continue)
-            match self.apply_hardware_trigger() {
-                Ok(true) => log::debug!("Hardware trigger applied"),
-                Ok(false) => log::debug!("No trigger source configured, skipping hardware trigger"),
-                Err(e) => log::warn!("Failed to apply hardware trigger: {}", e),
-            }
-        }
+        // Trigger detection is done entirely in software (find_trigger_* below) on
+        // the fully-captured buffer — uniformly for digital, analog, and the mixed
+        // per-group layout. We deliberately do NOT install a libsigrok
+        // soft_trigger_logic trigger: it emits only post-trigger data and blocks
+        // sr_session_run() indefinitely when the matching edge never arrives, and
+        // it cannot see the analog channels at all (they are a host-side
+        // reinterpretation of the raw logic bytes). Capturing a bounded
+        // limit_samples buffer and scanning it is robust and treats every channel
+        // type identically.
 
         unsafe {
             // Reset callback state for this acquisition
@@ -795,9 +751,28 @@ impl BridgeDevice for SigrokDevice {
                 }
             }
 
+            // Anchor the trigger for a stable display: keep at most `pretrigger`
+            // samples before the trigger and drop the rest of the pre-trigger
+            // front, so the reported buffer's trigger sits at a fixed offset
+            // (0 by default = trigger at the left edge, post-trigger only). The
+            // crop keeps AcquisitionData self-consistent: trigger_sample stays
+            // relative to logic_data.
+            if result.triggered {
+                let us = result.unitsize as usize;
+                if us > 0 {
+                    let pre = self.pretrigger.min(result.trigger_sample);
+                    let crop_bytes = ((result.trigger_sample - pre) as usize)
+                        .saturating_mul(us);
+                    if crop_bytes > 0 && crop_bytes <= result.logic_data.len() {
+                        result.logic_data.drain(0..crop_bytes);
+                    }
+                    result.trigger_sample = pre;
+                }
+            }
+
             log::info!(
-                "acquire: done, {} bytes logic data, unitsize={}, triggered={}",
-                result.logic_data.len(), result.unitsize, result.triggered
+                "acquire: done, {} bytes logic data, unitsize={}, triggered={}, trigger_sample={}",
+                result.logic_data.len(), result.unitsize, result.triggered, result.trigger_sample
             );
 
             Ok(result)

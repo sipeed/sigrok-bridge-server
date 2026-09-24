@@ -1,4 +1,4 @@
-use crate::types::{DeviceInfo, TriggerConfig, TriggerEdgeDir};
+use crate::types::{ChannelGroup, DeviceInfo, TriggerConfig, TriggerEdgeDir};
 
 /// Data collected from a single acquisition cycle.
 pub struct AcquisitionData {
@@ -18,6 +18,10 @@ pub struct AcquisitionData {
 /// (atomics, mutexes) for state that changes during operation.
 pub trait BridgeDevice: Send + Sync {
     fn info(&self) -> &DeviceInfo;
+    /// Ordered per-byte channel layout (one entry per byte of the capture
+    /// width, ascending byte_offset). Source of truth for CHANS?/LAYOUT? and
+    /// the analog/digital channel counts below.
+    fn channel_layout(&self) -> &[ChannelGroup];
     fn analog_channel_count(&self) -> u16;
     fn digital_channel_count(&self) -> u16;
     fn hw_digital_channel_count(&self) -> u16;

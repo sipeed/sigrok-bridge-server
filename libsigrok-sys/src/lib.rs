@@ -132,6 +132,7 @@ pub const SR_DF_LOGIC: u16 = 10004;
 // Config keys
 pub const SR_CONF_SAMPLERATE: u32 = 30000;
 pub const SR_CONF_PATTERN_MODE: u32 = 30002;
+pub const SR_CONF_NUM_LOGIC_CHANNELS: u32 = 30027;
 pub const SR_CONF_LIMIT_SAMPLES: u32 = 50001;
 
 // Trigger match types (enum sr_trigger_matches in libsigrok.h)
@@ -233,6 +234,7 @@ extern "C" {
     // GLib helpers
     pub fn g_variant_new_string(s: *const c_char) -> *mut GVariant;
     pub fn g_variant_new_uint64(v: u64) -> *mut GVariant;
+    pub fn g_variant_new_int32(v: i32) -> *mut GVariant;
     pub fn g_variant_get_uint64(v: *mut GVariant) -> u64;
     pub fn g_variant_unref(v: *mut GVariant);
     pub fn g_variant_get_type_string(v: *mut GVariant) -> *const c_char;

@@ -1,5 +1,5 @@
 [workspace]
-members = ["sigrok-bridge-common", "fake", "sigrok-bridge", "libsigrok-sys"]
+members = ["sigrok-bridge-common", "sigrok-bridge", "libsigrok-sys"]
 resolver = "2"
 
 # Release build: abort on panic. This avoids pulling in the LLVM libunwind
