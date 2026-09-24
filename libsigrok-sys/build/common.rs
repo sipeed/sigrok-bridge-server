@@ -28,6 +28,104 @@ pub fn libsigrok_tarball_url(commit: &str) -> String {
     LIBSIGROK_TARBALL_URL_TPL.replace("{COMMIT}", commit)
 }
 
+// ─── Local libsigrok source (unified source of truth) ───────────────────────
+
+/// The repo's own `sources/libsigrok` submodule, so the bridge links the exact
+/// libsigrok the rest of the tree develops against instead of a pinned upstream
+/// tarball. Resolution:
+///   1. `$LIBSIGROK_SRC_DIR`               (the AIO build sets this to the mount)
+///   2. `<manifest>/../../libsigrok`        (superproject sibling layout)
+/// Returns `None` when neither exists, so a standalone `cargo build` outside the
+/// superproject still falls back to the pinned tarball download.
+pub fn libsigrok_src_dir() -> Option<PathBuf> {
+    if let Ok(d) = env::var("LIBSIGROK_SRC_DIR") {
+        let d = d.trim();
+        if !d.is_empty() {
+            let p = PathBuf::from(d);
+            if is_libsigrok_tree(&p) {
+                return Some(p);
+            }
+            panic!(
+                "\nLIBSIGROK_SRC_DIR={} is not a libsigrok source tree \
+                 (no autogen.sh / configure.ac).\n",
+                p.display()
+            );
+        }
+    }
+    let sibling = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../libsigrok");
+    if is_libsigrok_tree(&sibling) {
+        return Some(sibling.canonicalize().unwrap_or(sibling));
+    }
+    None
+}
+
+fn is_libsigrok_tree(p: &Path) -> bool {
+    p.join("autogen.sh").is_file() || p.join("configure.ac").is_file()
+}
+
+/// Identity of the local libsigrok source, used in the build stamp so a changed
+/// source rebuilds libsigrok. Resolution:
+///   1. `$LIBSIGROK_SRC_REV`               (the AIO computes the git rev on the host)
+///   2. `git -C <dir> rev-parse HEAD` (+ `-dirty`)   (standalone with a checkout)
+///   3. `None`                             (no identity — caller always rebuilds)
+pub fn libsigrok_src_rev(dir: &Path) -> Option<String> {
+    if let Ok(r) = env::var("LIBSIGROK_SRC_REV") {
+        let r = r.trim();
+        if !r.is_empty() {
+            return Some(r.to_string());
+        }
+    }
+    let head = Command::new("git")
+        .args(["-C"]).arg(dir).args(["rev-parse", "HEAD"])
+        .output().ok().filter(|o| o.status.success())?;
+    let mut rev = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    if rev.is_empty() {
+        return None;
+    }
+    let dirty = Command::new("git")
+        .args(["-C"]).arg(dir).args(["status", "--porcelain"])
+        .output().ok();
+    if let Some(o) = dirty {
+        if o.status.success() && !o.stdout.is_empty() {
+            rev.push_str("-dirty");
+        }
+    }
+    Some(rev)
+}
+
+/// Copy a source tree into a fresh build directory, dropping VCS and autotools
+/// build cruft so `autogen.sh`/`configure` regenerate cleanly. Prefers rsync
+/// (present in the AIO image); falls back to `cp -a`.
+pub fn copy_tree(src: &Path, dst: &Path) {
+    if dst.exists() {
+        fs::remove_dir_all(dst).expect("remove stale libsigrok source copy");
+    }
+    fs::create_dir_all(dst).expect("create libsigrok source copy dir");
+    if on_path("rsync") {
+        run(
+            Command::new("rsync")
+                .args([
+                    "-a", "--delete",
+                    "--exclude=.git", "--exclude=autom4te.cache",
+                    "--exclude=.libs", "--exclude=.deps",
+                ])
+                .arg(format!("{}/", src.display()))
+                .arg(dst),
+            "copy libsigrok source (rsync)",
+        );
+    } else {
+        run(
+            Command::new("cp").arg("-a")
+                .arg(format!("{}/.", src.display()))
+                .arg(dst),
+            "copy libsigrok source (cp)",
+        );
+        let _ = fs::remove_dir_all(dst.join(".git"));
+        let _ = fs::remove_file(dst.join(".git"));
+        let _ = fs::remove_dir_all(dst.join("autom4te.cache"));
+    }
+}
+
 // ─── Cache directory ─────────────────────────────────────────────────────────
 
 /// Persistent cache root for downloaded tarballs and MSYS2 packages.
@@ -184,6 +282,8 @@ pub fn emit_rerun() {
         "LIBSIGROK_SYS_TARBALL_DIR",
         "LIBSIGROK_SYS_GITHUB_MIRROR",
         "LIBSIGROK_COMMIT",
+        "LIBSIGROK_SRC_DIR",
+        "LIBSIGROK_SRC_REV",
     ] {
         println!("cargo:rerun-if-env-changed={k}");
     }

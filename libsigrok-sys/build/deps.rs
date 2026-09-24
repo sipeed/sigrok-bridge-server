@@ -366,34 +366,64 @@ pub fn build_glib(ctx: &Ctx) {
 }
 
 pub fn build_libsigrok(ctx: &Ctx) {
-    let commit = common::libsigrok_commit();
     let bridge_patch = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("patches/libsigrok-bridge-fixes.patch");
     let patch_contents = fs::read(&bridge_patch).expect("read libsigrok bridge patch");
+
+    // Source of truth: the repo's own sources/libsigrok when available (unified
+    // with the rest of the tree), else the pinned upstream tarball for a
+    // standalone crate build. `force_rebuild` skips the stamp cache when the
+    // source identity can't be trusted to change on edits (dirty / unknown).
+    let local_src = common::libsigrok_src_dir();
+    let (source_id, force_rebuild) = match &local_src {
+        Some(dir) => match common::libsigrok_src_rev(dir) {
+            Some(rev) => {
+                let dirty = rev.ends_with("-dirty");
+                (format!("src:{rev}"), dirty)
+            }
+            None => ("src:unknown".to_string(), true),
+        },
+        None => (format!("tarball:{}", common::libsigrok_commit()), false),
+    };
+
     let patch_stamp = ctx.prefix.join(".libsigrok-bridge-fixes.patch");
-    let mut stamp_contents = commit.as_bytes().to_vec();
+    let mut stamp_contents = source_id.as_bytes().to_vec();
     stamp_contents.push(b'\n');
     stamp_contents.extend_from_slice(&patch_contents);
     let library = ctx.prefix.join("lib/libsigrok.a");
-    if library.exists()
+    if !force_rebuild
+        && library.exists()
         && fs::read(&patch_stamp).ok().as_deref() == Some(stamp_contents.as_slice())
     {
         return;
     }
 
     common::log(">>> [8/8] libsigrok");
-    common::log(&format!("    commit: {commit}"));
+    common::log(&format!("    source: {source_id}"));
 
-    let tarball  = ctx.tarballs.join(format!("libsigrok-{commit}.tar.gz"));
-    let builddir = ctx.src.join(format!("libsigrok-{commit}"));
+    let builddir = ctx.src.join("libsigrok-build");
     if library.exists() {
         fs::remove_file(&library).expect("remove stale libsigrok.a");
     }
-    if builddir.exists() {
-        fs::remove_dir_all(&builddir).expect("remove stale patched libsigrok source");
+    match &local_src {
+        Some(dir) => {
+            common::log(&format!("    local: {}", dir.display()));
+            common::copy_tree(dir, &builddir);
+        }
+        None => {
+            let commit = common::libsigrok_commit();
+            let tarball = ctx.tarballs.join(format!("libsigrok-{commit}.tar.gz"));
+            let extract_root = ctx.src.join(format!("libsigrok-{commit}"));
+            for stale in [&builddir, &extract_root] {
+                if stale.exists() {
+                    fs::remove_dir_all(stale).expect("remove stale libsigrok source");
+                }
+            }
+            common::fetch(&common::libsigrok_tarball_url(&commit), &tarball);
+            common::extract(&tarball, &ctx.src);
+            fs::rename(&extract_root, &builddir).expect("normalize extracted dir");
+        }
     }
-    common::fetch(&common::libsigrok_tarball_url(&commit), &tarball);
-    common::extract(&tarball, &ctx.src);
 
     // VXI-11 patch: drop the scpi_vxi_dev registration. scpi_vxi.o would
     // otherwise force libtirpc + the krb5 chain via xdr_*. Edited in-process:

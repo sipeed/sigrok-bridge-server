@@ -1,6 +1,12 @@
+# sigrok-bridge integration: advertise a fixed list of capture depths via
+# SR_CONF_LIMIT_SAMPLES | SR_CONF_LIST. Applied at build time to the copied
+# libsigrok source (deps.rs build_libsigrok); guarded by the sampledepths_slogic
+# marker so a re-run or an upstream that already carries it is a no-op.
+diff --git a/src/hardware/sipeed-slogic-analyzer/api.c b/src/hardware/sipeed-slogic-analyzer/api.c
+index 87f16df8..ffb425e7 100644
 --- a/src/hardware/sipeed-slogic-analyzer/api.c
 +++ b/src/hardware/sipeed-slogic-analyzer/api.c
-@@ -34,7 +34,7 @@
+@@ -43,7 +43,7 @@ static const uint32_t drvopts[] = {
  
  static const uint32_t devopts[] = {
  	SR_CONF_CONTINUOUS,
@@ -9,10 +15,12 @@
  	SR_CONF_PATTERN_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
  	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
  	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
-@@ -144,6 +144,16 @@
- static const uint64_t limit_samplerates_slogic32u3[] = 
- 	{ SR_MHZ(1600), SR_MHZ(800), SR_MHZ(400), SR_MHZ(200) };
+@@ -51,6 +51,18 @@ static const uint32_t devopts[] = {
+ 	SR_CONF_NUM_LOGIC_CHANNELS | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST
+ };
  
++/* Selectable capture depths advertised to the host through
++ * SR_CONF_LIMIT_SAMPLES | SR_CONF_LIST (consumed by sigrok-bridge). */
 +static const uint64_t sampledepths_slogic[] = {
 +	UINT64_C(1000), UINT64_C(2000), UINT64_C(5000),
 +	UINT64_C(10000), UINT64_C(20000), UINT64_C(50000),
@@ -23,201 +31,16 @@
 +	UINT64_C(1000000000),
 +};
 +
- static const char *patterns[] = {
- 	[PATTERN_MODE_NORMAL] = "Normal",
- 	[PATTERN_MODE_TEST_HARDWARE_USB_MAX_SPEED] = "USB connection test",
-@@ -598,6 +608,9 @@
- 		if (NULL == devc->model)
- 			ret = SR_ERR_ARG;
+ /* Model tables (samplerates, channel modes, ceilings, pattern names) now
+  * live in the shared core (slogic/) and are read through slogic_model and
+  * the slogic_* accessors. */
+@@ -495,6 +507,9 @@ static int config_list(uint32_t key, GVariant **data,
+ 	case SR_CONF_VOLTAGE_THRESHOLD:
+ 		*data = std_gvar_min_max_step_thresholds(0, 6, 0.1);
  		break;
 +	case SR_CONF_LIMIT_SAMPLES:
 +		*data = std_gvar_array_u64(ARRAY_AND_SIZE(sampledepths_slogic));
 +		break;
- 	case SR_CONF_NUM_LOGIC_CHANNELS:
- 		*data = std_gvar_array_i32(devc->model->samplechannel_table, devc->model->samplechannel_table_size);
- 		break;
---- a/src/hardware/sipeed-slogic-analyzer/protocol.c
-+++ b/src/hardware/sipeed-slogic-analyzer/protocol.c
-@@ -122,9 +122,7 @@
- 				    devc->per_transfer_nbytes <
- 		    devc->samples_need_nbytes) {
- 			transfer->actual_length = 0;
--			transfer->timeout = (TRANSFERS_DURATION_TOLERANCE + 1) *
--					    devc->per_transfer_duration *
--					    (devc->num_transfers_used + 2);
-+			transfer->timeout = SLOGIC_TRANSFER_TIMEOUT_MS(devc);
- 			ret = libusb_submit_transfer(transfer);
- 			if (ret) {
- 				sr_dbg("Failed to submit transfer: %s",
-@@ -144,36 +142,51 @@
- 		break;
+ 	default:
+ 		ret = SR_ERR_NA;
  	}
- 
--	double actual_rate = (double)devc->transfers_reached_nbytes_latest / transfers_reached_duration;
--	double average_rate = (double)devc->transfers_reached_nbytes / transfers_all_duration;
--	if (devc->num_transfers_completed > 1 &&
--	    ((double)transfers_reached_duration / SR_KHZ(1) >
--		    (TRANSFERS_DURATION_TOLERANCE + 1) * devc->per_transfer_duration ||
--		actual_rate < expected_rate * (1.0 - TRANSFERS_DURATION_TOLERANCE) ||
--		average_rate < expected_rate * 0.95
--	    )
--	) {
-+	/* Judge shortfall against the wall clock instead of per-transfer
-+	 * jitter: the submitted URB window itself absorbs host-side stalls,
-+	 * so the capture is only at risk once received bytes lag the
-+	 * device's fixed produce rate by more than that whole window, and
-+	 * stay behind for a full window of completions.
-+	 *
-+	 * A cold USB start ramps to full rate only after a warm-up, whose
-+	 * slow bytes would depress a since-start average forever. So take a
-+	 * baseline once the warm-up grace has elapsed and measure the deficit
-+	 * from there: a device that warms up slowly but then sustains rate is
-+	 * left alone, while one that stays behind in steady state is caught. */
-+	double expected_Bpus = (double)devc->cur_samplerate *
-+			       devc->cur_samplechannel / 8 / 1e6;
-+	uint64_t window_nbytes =
-+		(uint64_t)NUM_MAX_TRANSFERS * devc->per_transfer_nbytes;
-+	if (!devc->steady_time_start &&
-+	    transfers_all_duration >= SLOGIC_WARMUP_US) {
-+		devc->steady_time_start = transfers_reached_time_now;
-+		devc->steady_nbytes_start = devc->transfers_reached_nbytes;
-+	}
-+	int64_t steady_duration = devc->steady_time_start
-+		? transfers_reached_time_now - devc->steady_time_start
-+		: 0;
-+	uint64_t steady_nbytes =
-+		devc->transfers_reached_nbytes - devc->steady_nbytes_start;
-+	uint64_t expected_nbytes = (uint64_t)(steady_duration * expected_Bpus);
-+	double steady_rate = steady_duration
-+		? (double)steady_nbytes / steady_duration
-+		: 0;
-+	if (devc->samples_got_nbytes < devc->samples_need_nbytes &&
-+	    devc->steady_time_start &&
-+	    steady_nbytes + window_nbytes + window_nbytes / 4 < expected_nbytes) {
- 		devc->timeout_count += 1;
- 	} else {
- 		devc->timeout_count = 0;
- 	}
- 
--	if (devc->timeout_count > devc->num_transfers_used) {
--		sr_err("Timeout %.3fms!!! Rate %.2fMBps(avg)<%.0fMBps(exp) or Reach duration limit: %.3f(%u+%.1f%%), %.3f > "
--				"%.3f(%u+%.1f%%)(total) except first one.",
--				(double)transfers_reached_duration / SR_KHZ(1),
--				average_rate, expected_rate,
--				(TRANSFERS_DURATION_TOLERANCE + 1) *
--					devc->per_transfer_duration,
--				devc->per_transfer_duration,
--				TRANSFERS_DURATION_TOLERANCE * 100,
--				(double)transfers_all_duration / SR_KHZ(1),
--				(TRANSFERS_DURATION_TOLERANCE + 1) *
--					devc->per_transfer_duration *
--					devc->num_transfers_completed,
--				devc->per_transfer_duration *
--					(devc->num_transfers_completed + 1),
--				TRANSFERS_DURATION_TOLERANCE * 100);
-+	if (devc->timeout_count > NUM_MAX_TRANSFERS) {
-+		sr_err("Sustained USB shortfall: got %llu bytes in %.3fms of "
-+		       "steady state (%.2fMBps < %.0fMBps(exp)), deficit beyond "
-+		       "%llu-byte URB window; aborting capture.",
-+		       (unsigned long long)steady_nbytes,
-+		       (double)steady_duration / SR_KHZ(1),
-+		       steady_rate, expected_rate,
-+		       (unsigned long long)(window_nbytes + window_nbytes / 4));
- 		devc->acq_aborted = 1;
- 	}
- 
-@@ -248,9 +261,11 @@
- 		std_session_send_df_end(sdi);
- 		sr_session_source_remove(sdi->session,
- 					 -1 * (size_t)drvc->sr_ctx->libusb_ctx);
--	} else if (g_async_queue_length(devc->raw_data_queue)) {
--		GByteArray *array = g_async_queue_try_pop(devc->raw_data_queue);
--		if (array != NULL) {
-+	} else {
-+		/* Drain everything queued so far; consuming one array per
-+		 * poll cannot keep up with the producer at high rates. */
-+		GByteArray *array;
-+		while ((array = g_async_queue_try_pop(devc->raw_data_queue))) {
- 			if (devc->trigger_fired) {
- 				devc->model->submit_raw_data(
- 					array->data, array->len, sdi);
-@@ -333,13 +348,22 @@
- 			       libusb_error_name(ret));
- 		}
- 
--		try_transfer_nbytes >>=
--			2; // At least 4 transfets can be pending.
-+		/* The probed size is the whole budget the system will accept
-+		 * in flight at once. Split it across every transfer slot so
-+		 * the full window really gets submitted, instead of a few
-+		 * quarter-budget URBs. */
-+		try_transfer_nbytes /= NUM_MAX_TRANSFERS;
-+		try_transfer_nbytes = (try_transfer_nbytes + (ALIGN_SIZE - 1)) &
-+				      ~(ALIGN_SIZE - 1);
-+		if (!try_transfer_nbytes)
-+			try_transfer_nbytes = ALIGN_SIZE;
- 		break;
- 	} while (try_transfer_nbytes >
- 		 ALIGN_SIZE); // 32kiB > 125ms * 1MHZ * 2ch
- 
- 	cur_transfer_duration = try_transfer_nbytes / BpMs;
-+	if (!cur_transfer_duration)
-+		cur_transfer_duration = 1;
- 	sr_dbg("Choose: receive %u bytes per %ums :)", try_transfer_nbytes,
- 	       cur_transfer_duration);
- 
-@@ -387,6 +411,8 @@
- 	memset(devc->transfers, 0, sizeof(devc->transfers));
- 	devc->transfers_reached_nbytes = 0;
- 	devc->timeout_count = 0;
-+	devc->steady_time_start = 0;
-+	devc->steady_nbytes_start = 0;
- 	devc->raw_data_queue = g_async_queue_new();
- 
- 	if (!devc->raw_data_queue) {
-@@ -416,9 +442,7 @@
- 		libusb_fill_bulk_transfer(
- 			transfer, usb->devhdl, devc->model->ep_in, dev_buf,
- 			devc->per_transfer_nbytes, receive_transfer, sdi,
--			(TRANSFERS_DURATION_TOLERANCE + 1) *
--				devc->per_transfer_duration *
--				(devc->num_transfers_used + 2));
-+			SLOGIC_TRANSFER_TIMEOUT_MS(devc));
- 		transfer->actual_length = 0;
- 
- 		transfer->flags |= LIBUSB_TRANSFER_FREE_BUFFER;
---- a/src/hardware/sipeed-slogic-analyzer/protocol.h
-+++ b/src/hardware/sipeed-slogic-analyzer/protocol.h
-@@ -32,8 +32,18 @@
- #define LOG_PREFIX "sipeed-slogic-analyzer"
- 
- #define USB_VID_SIPEED UINT16_C(0x359f)
--#define NUM_MAX_TRANSFERS 16
-+#define NUM_MAX_TRANSFERS 32
- #define TRANSFERS_DURATION_TOLERANCE 0.3f
-+/* Per-URB timeout. The explicit cancel path in handle_events keeps STOP
-+ * responsive, so this only needs to catch a device that stopped streaming:
-+ * give it the whole in-flight window plus a fixed floor, uniformly. */
-+#define SLOGIC_TRANSFER_TIMEOUT_MS(devc)                          \
-+	(100 + (unsigned int)((TRANSFERS_DURATION_TOLERANCE + 1) * \
-+			      (devc)->per_transfer_duration * NUM_MAX_TRANSFERS))
-+/* A cold USB start (first capture after a reconfigure) ramps to full
-+ * rate over the device's warm-up; the shortfall watchdog ignores this
-+ * grace window so it judges only the sustained steady state. */
-+#define SLOGIC_WARMUP_US INT64_C(200000)
- 
- enum {
- 	PATTERN_MODE_NORMAL,
-@@ -101,6 +111,12 @@
- 
- 		GAsyncQueue *raw_data_queue;
- 		uint64_t timeout_count;
-+
-+		/* Shortfall is judged only after the device has left its
-+		 * cold-start warm-up ramp, from a baseline snapshot taken
-+		 * once, so the ramp's slow bytes don't poison the average. */
-+		int64_t steady_time_start;   /* 0 until warm-up grace elapses */
-+		uint64_t steady_nbytes_start;
- 	}; // usb
- 
- 	int acq_aborted;
