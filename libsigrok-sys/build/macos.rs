@@ -84,6 +84,13 @@ fn emit_link_directives(prefix: &std::path::Path) {
     // resolve to libSystem.
     let force_dynamic = ["m", "pthread", "c", "iconv"];
 
+    // glib is built with nls=disabled, so no libintl / libcharset is produced.
+    // Transitive .pc files (glib-2.0.pc et al.) can still list -lintl / -lcharset
+    // in Libs.private; on macOS those are separate libraries (not folded into
+    // libc as on glibc/musl), so the linker fails with "library 'intl' not
+    // found". With NLS off glib references no gettext symbols, so drop them.
+    let skip_nls = ["intl", "charset"];
+
     let out = Command::new("pkg-config")
         .env("PKG_CONFIG_PATH", prefix.join("lib/pkgconfig"))
         .args(["--static", "--libs", "libsigrok"])
@@ -108,6 +115,9 @@ fn emit_link_directives(prefix: &std::path::Path) {
             }
             continue;
         };
+        if skip_nls.contains(&name) {
+            continue;
+        }
         let has_static = !force_dynamic.contains(&name)
             && prefix.join(format!("lib/lib{name}.a")).exists();
         let kind = if has_static { "static" } else { "dylib" };

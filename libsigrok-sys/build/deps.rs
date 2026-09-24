@@ -314,6 +314,24 @@ pub fn build_glib(ctx: &Ctx) {
     common::fetch(GLIB_URL, &tarball);
     if !builddir.exists() { common::extract(&tarball, &ctx.src); }
 
+    // glib hardcodes `glib_conf.set('ENABLE_NLS', 1)` — the `nls` meson option only
+    // gates xgettext/translation generation, NOT this define — so glib ALWAYS pulls
+    // in libintl: an external gettext, or (with none present, as on our isolated
+    // macOS build) its proxy-libintl subproject. In a static build that proxy is a
+    // separate, non-installed archive, leaving glib's g_libintl_* references
+    // undefined at the final bridge link. We don't need i18n, so drop the define:
+    // glibintl.h then uses its no-op fallback macros and glib references no gettext
+    // symbols at all. (This is what the nls=disabled below was meant to achieve.)
+    {
+        let mb = builddir.join("meson.build");
+        let s = std::fs::read_to_string(&mb).expect("read glib meson.build");
+        if s.contains("glib_conf.set('ENABLE_NLS', 1)") {
+            let patched = s.replace("glib_conf.set('ENABLE_NLS', 1)\n", "");
+            std::fs::write(&mb, patched).expect("write glib meson.build");
+            common::log("    patched glib: dropped ENABLE_NLS (no i18n, no libintl)");
+        }
+    }
+
     let build = builddir.join("build");
     let _ = std::fs::remove_dir_all(&build);
 
