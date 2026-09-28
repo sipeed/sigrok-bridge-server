@@ -322,13 +322,20 @@ pub fn build_glib(ctx: &Ctx) {
     // undefined at the final bridge link. We don't need i18n, so drop the define:
     // glibintl.h then uses its no-op fallback macros and glib references no gettext
     // symbols at all. (This is what the nls=disabled below was meant to achieve.)
-    {
+    // macOS ONLY: Linux (glibc) and Windows (MSYS2) ship a real <libintl.h> +
+    // gettext, so glib builds fine with ENABLE_NLS and dropping the define there is
+    // actively harmful — with ENABLE_NLS unset, glibintl.h's no-op `#define
+    // gettext(String) (String)` macro-expands inside the system <libintl.h>
+    // declarations (`extern char *gettext(const char *)` -> `extern char *(const
+    // char *)`), breaking glib's own ggettext.c compile. Only macOS (no system
+    // gettext) needs the define dropped to avoid the proxy-libintl static-link gap.
+    if ctx.platform == Platform::MacOS {
         let mb = builddir.join("meson.build");
         let s = std::fs::read_to_string(&mb).expect("read glib meson.build");
         if s.contains("glib_conf.set('ENABLE_NLS', 1)") {
             let patched = s.replace("glib_conf.set('ENABLE_NLS', 1)\n", "");
             std::fs::write(&mb, patched).expect("write glib meson.build");
-            common::log("    patched glib: dropped ENABLE_NLS (no i18n, no libintl)");
+            common::log("    patched glib: dropped ENABLE_NLS (macOS, no libintl)");
         }
     }
 
